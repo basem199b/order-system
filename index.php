@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta http-equiv="Content-Type" content="text/html; charset=utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>نظام أطايب التمور اللوجستي</title>
+    <title>نظام كل زق  التمور اللوجستي</title>
     
     <!-- مكتبة قارئ الباركود -->
     <script src="https://unpkg.com/html5-qrcode"></script>
