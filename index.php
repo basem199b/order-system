@@ -1,107 +1,48 @@
 <?php
 session_start();
-
-$db = new PDO("sqlite:data.db");
-
-// إنشاء الجداول
-$db->exec("CREATE TABLE IF NOT EXISTS users (
-id INTEGER PRIMARY KEY,
-username TEXT,
-password TEXT,
-role TEXT
-)");
-
-$db->exec("CREATE TABLE IF NOT EXISTS orders (
-id INTEGER PRIMARY KEY,
-order_no TEXT,
-status TEXT,
-assigned_to INTEGER
-)");
-
-// أول تشغيل
-if($db->query("SELECT COUNT(*) FROM users")->fetchColumn()==0){
-$db->exec("INSERT INTO users VALUES
-(1,'admin','1234','admin'),
-(2,'emp','1234','employee')");
+date_default_timezone_set('Asia/Riyadh');
+$db = new PDO('sqlite:' . __DIR__ . '/packing_pro.db');
+$db->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
+$db->exec("CREATE TABLE IF NOT EXISTS employees (id INTEGER PRIMARY KEY AUTOINCREMENT,name TEXT NOT NULL,username TEXT UNIQUE NOT NULL,password TEXT NOT NULL,role TEXT NOT NULL DEFAULT 'employee',is_active INTEGER NOT NULL DEFAULT 1,created_at TEXT DEFAULT CURRENT_TIMESTAMP);
+CREATE TABLE IF NOT EXISTS orders (id INTEGER PRIMARY KEY AUTOINCREMENT,order_no TEXT UNIQUE NOT NULL,customer TEXT,phone TEXT,status TEXT NOT NULL DEFAULT 'new',assigned_to INTEGER,started_at TEXT,completed_at TEXT,created_at TEXT DEFAULT CURRENT_TIMESTAMP);
+CREATE TABLE IF NOT EXISTS order_items (id INTEGER PRIMARY KEY AUTOINCREMENT,order_id INTEGER NOT NULL,sku TEXT NOT NULL,name TEXT NOT NULL,qty INTEGER NOT NULL DEFAULT 1,scanned INTEGER NOT NULL DEFAULT 0);
+CREATE TABLE IF NOT EXISTS scan_logs (id INTEGER PRIMARY KEY AUTOINCREMENT,order_id INTEGER,employee_id INTEGER,sku TEXT,type TEXT,message TEXT,created_at TEXT DEFAULT CURRENT_TIMESTAMP);
+CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY,value TEXT);");
+if ((int)$db->query("SELECT COUNT(*) FROM employees")->fetchColumn() === 0) {
+  $s=$db->prepare("INSERT INTO employees (name,username,password,role) VALUES (?,?,?,?)");
+  $s->execute(['المدير','admin',password_hash('1234',PASSWORD_DEFAULT),'manager']);
+  $s->execute(['أحمد محمد','ahmad',password_hash('1111',PASSWORD_DEFAULT),'employee']);
+  $s->execute(['خالد عبدالله','khalid',password_hash('2222',PASSWORD_DEFAULT),'employee']);
+  $db->exec("INSERT OR REPLACE INTO settings (key,value) VALUES ('min_orders','50'),('min_accuracy','90'),('bonus_percent','5')");
+  $db->prepare("INSERT INTO orders (order_no,customer,phone) VALUES (?,?,?)")->execute(['256178922','بشاير','0501654403']);
+  $oid=(int)$db->lastInsertId(); $it=$db->prepare("INSERT INTO order_items (order_id,sku,name,qty) VALUES (?,?,?,?)");
+  $it->execute([$oid,'006020129','سلة خوص معمول فاخر',1]); $it->execute([$oid,'006020114','سلة كليجا ميني',1]);
 }
-
-// تسجيل الدخول
-if(isset($_POST['login'])){
-$q=$db->prepare("SELECT * FROM users WHERE username=? AND password=?");
-$q->execute([$_POST['u'],$_POST['p']]);
-$user=$q->fetch();
-if($user){
-$_SESSION['id']=$user['id'];
-$_SESSION['role']=$user['role'];
-header("Location:/"); exit;
-}
-}
-
-// إضافة طلب
-if(isset($_POST['add']) && $_SESSION['role']=='admin'){
-$db->prepare("INSERT INTO orders (order_no,status) VALUES (?,?)")
-->execute([$_POST['order'],'new']);
-}
-
-// استلام طلب
-if(isset($_GET['take'])){
-$db->prepare("UPDATE orders SET assigned_to=?,status='working' WHERE id=? AND assigned_to IS NULL")
-->execute([$_SESSION['id'],$_GET['take']]);
-}
-
-// إنهاء طلب
-if(isset($_GET['done'])){
-$db->prepare("UPDATE orders SET status='done' WHERE id=? AND assigned_to=?")
-->execute([$_GET['done'],$_SESSION['id']]);
-}
+function h($v){return htmlspecialchars((string)$v,ENT_QUOTES,'UTF-8');} function u(){return $_SESSION['user']??null;} function mgr(){return u()&&u()['role']==='manager';} function go($p='dashboard'){header('Location: packing_pro.php?page='.$p);exit;} function need(){if(!u())go('login');}
+function flash($m,$t='ok'){$_SESSION['flash']=['m'=>$m,'t'=>$t];} function status_ar($s){return ['new'=>'جديد','processing'=>'قيد التجهيز','completed'=>'مكتمل'][$s]??$s;}
+function setting($db,$k,$d=''){ $q=$db->prepare('SELECT value FROM settings WHERE key=?');$q->execute([$k]);$v=$q->fetchColumn();return $v!==false?$v:$d; }
+function stats($db,$id){$id=(int)$id;$c=(int)$db->query("SELECT COUNT(*) FROM orders WHERE assigned_to=$id AND status='completed'")->fetchColumn();$e=(int)$db->query("SELECT COUNT(*) FROM scan_logs WHERE employee_id=$id AND type!='success'")->fetchColumn();$t=(int)$db->query("SELECT COUNT(*) FROM scan_logs WHERE employee_id=$id")->fetchColumn();$a=$t?round((($t-$e)/$t)*100,1):100;$avg=$db->query("SELECT ROUND(AVG((julianday(completed_at)-julianday(started_at))*24*60),1) FROM orders WHERE assigned_to=$id AND status='completed'")->fetchColumn();return ['completed'=>$c,'errors'=>$e,'accuracy'=>$a,'avg'=>$avg?:'-'];}
+$page=$_GET['page']??(u()?'dashboard':'login');
+if($page==='logout'){session_destroy();header('Location: packing_pro.php');exit;}
+if($_SERVER['REQUEST_METHOD']==='POST'&&$page==='login'){ $q=$db->prepare('SELECT * FROM employees WHERE username=? AND is_active=1');$q->execute([trim($_POST['username']??'')]);$user=$q->fetch(PDO::FETCH_ASSOC); if($user&&password_verify($_POST['password']??'',$user['password'])){$_SESSION['user']=$user;go('dashboard');} flash('بيانات الدخول غير صحيحة','bad');go('login'); }
+if($_SERVER['REQUEST_METHOD']==='POST'&&$page==='add_employee'){need();if(!mgr())go();try{$q=$db->prepare('INSERT INTO employees (name,username,password,role) VALUES (?,?,?,?)');$q->execute([trim($_POST['name']),trim($_POST['username']),password_hash($_POST['password'],PASSWORD_DEFAULT),$_POST['role']]);flash('تم إضافة الموظف');}catch(Exception $e){flash('تعذر إضافة الموظف','bad');}go('employees');}
+if($_SERVER['REQUEST_METHOD']==='POST'&&$page==='save_settings'){need();if(!mgr())go();$q=$db->prepare('INSERT OR REPLACE INTO settings (key,value) VALUES (?,?)');$q->execute(['min_orders',(string)(int)$_POST['min_orders']]);$q->execute(['min_accuracy',(string)(float)$_POST['min_accuracy']]);$q->execute(['bonus_percent',(string)(float)$_POST['bonus_percent']]);flash('تم حفظ إعدادات الحوافز');go('incentives');}
+if($_SERVER['REQUEST_METHOD']==='POST'&&$page==='add_order'){need();if(!mgr())go();try{$db->beginTransaction();$db->prepare('INSERT INTO orders (order_no,customer,phone) VALUES (?,?,?)')->execute([trim($_POST['order_no']),trim($_POST['customer']),trim($_POST['phone'])]);$oid=$db->lastInsertId();$it=$db->prepare('INSERT INTO order_items (order_id,sku,name,qty) VALUES (?,?,?,?)');foreach($_POST['sku'] as $i=>$sku){$sku=trim($sku);if($sku==='')continue;$it->execute([$oid,$sku,trim($_POST['item_name'][$i]),max(1,(int)$_POST['qty'][$i])]);}$db->commit();flash('تم إضافة الطلب');}catch(Exception $e){if($db->inTransaction())$db->rollBack();flash('تعذر إضافة الطلب، تأكد من عدم تكرار رقم الطلب','bad');}go('orders');}
+if($_SERVER['REQUEST_METHOD']==='POST'&&$page==='upload_csv'){need();if(!mgr())go();if(!isset($_FILES['csv'])||$_FILES['csv']['error']!==UPLOAD_ERR_OK){flash('لم يتم رفع الملف','bad');go('orders');}$h=fopen($_FILES['csv']['tmp_name'],'r');$created=0;$items=0;$row=0;$db->beginTransaction();try{while(($d=fgetcsv($h,5000,','))!==false){$row++;if($row===1&&preg_match('/order|رقم|طلب/u',implode(' ',$d)))continue;if(count($d)<6)continue;[$no,$cust,$phone,$sku,$name,$qty]=array_map('trim',array_slice($d,0,6));if($no===''||$sku==='')continue;$q=$db->prepare('SELECT id FROM orders WHERE order_no=?');$q->execute([$no]);$oid=$q->fetchColumn();if(!$oid){$db->prepare('INSERT INTO orders (order_no,customer,phone) VALUES (?,?,?)')->execute([$no,$cust,$phone]);$oid=$db->lastInsertId();$created++;}$ex=$db->prepare('SELECT id FROM order_items WHERE order_id=? AND sku=?');$ex->execute([$oid,$sku]);if(!$ex->fetchColumn()){$db->prepare('INSERT INTO order_items (order_id,sku,name,qty) VALUES (?,?,?,?)')->execute([$oid,$sku,$name,max(1,(int)$qty)]);$items++;}}fclose($h);$db->commit();flash("تم رفع الملف: $created طلب و $items منتج");}catch(Exception $e){if($db->inTransaction())$db->rollBack();flash('تعذر معالجة ملف CSV','bad');}go('orders');}
+if($_SERVER['REQUEST_METHOD']==='POST'&&$page==='open_order'){need();$q=$db->prepare('SELECT * FROM orders WHERE order_no=?');$q->execute([trim($_POST['order_no']??'')]);$o=$q->fetch(PDO::FETCH_ASSOC);if(!$o){flash('رقم الطلب غير موجود','bad');go();}if($o['status']==='completed'){flash('هذا الطلب مكتمل مسبقاً','bad');go();}if($o['assigned_to']&&(int)$o['assigned_to']!=(int)u()['id']){flash('هذا الطلب قيد التجهيز بواسطة موظف آخر','bad');go();}$db->prepare("UPDATE orders SET assigned_to=?,status='processing',started_at=COALESCE(started_at,datetime('now','localtime')) WHERE id=?")->execute([u()['id'],$o['id']]);header('Location: packing_pro.php?page=prepare&id='.$o['id']);exit;}
+if($_SERVER['REQUEST_METHOD']==='POST'&&$page==='scan'){need();$oid=(int)$_POST['order_id'];$sku=trim($_POST['sku']);$q=$db->prepare('SELECT * FROM orders WHERE id=?');$q->execute([$oid]);$o=$q->fetch(PDO::FETCH_ASSOC);if(!$o||(int)$o['assigned_to']!=(int)u()['id']){flash('غير مسموح لك بتجهيز هذا الطلب','bad');go();}$q=$db->prepare('SELECT * FROM order_items WHERE order_id=? AND sku=?');$q->execute([$oid,$sku]);$it=$q->fetch(PDO::FETCH_ASSOC);if(!$it){$db->prepare('INSERT INTO scan_logs (order_id,employee_id,sku,type,message) VALUES (?,?,?,?,?)')->execute([$oid,u()['id'],$sku,'wrong_item','منتج غير موجود في الطلب']);flash('خطأ: المنتج غير موجود في الطلب','bad');}elseif($it['scanned']>=$it['qty']){$db->prepare('INSERT INTO scan_logs (order_id,employee_id,sku,type,message) VALUES (?,?,?,?,?)')->execute([$oid,u()['id'],$sku,'extra_qty','كمية زائدة']);flash('خطأ: كمية زائدة','bad');}else{$db->prepare('UPDATE order_items SET scanned=scanned+1 WHERE id=?')->execute([$it['id']]);$db->prepare('INSERT INTO scan_logs (order_id,employee_id,sku,type,message) VALUES (?,?,?,?,?)')->execute([$oid,u()['id'],$sku,'success','مسح صحيح']);flash('تم مسح المنتج');}header('Location: packing_pro.php?page=prepare&id='.$oid);exit;}
+if($page==='complete'){need();$id=(int)$_GET['id'];$q=$db->prepare('SELECT * FROM orders WHERE id=?');$q->execute([$id]);$o=$q->fetch(PDO::FETCH_ASSOC);if(!$o||(int)$o['assigned_to']!=(int)u()['id']){flash('غير مسموح لك بإغلاق هذا الطلب','bad');go();}$m=$db->prepare('SELECT COUNT(*) FROM order_items WHERE order_id=? AND scanned<qty');$m->execute([$id]);if($m->fetchColumn()>0){flash('لا يمكن اعتماد الطلب قبل اكتماله 100%','bad');header("Location: packing_pro.php?page=prepare&id=$id");exit;}$db->prepare("UPDATE orders SET status='completed',completed_at=datetime('now','localtime') WHERE id=?")->execute([$id]);flash('تم اعتماد تجهيز الطلب وحفظ الوقت');go();}
+if($page==='release_order'){need();if(!mgr())go();$db->prepare("UPDATE orders SET assigned_to=NULL,status='new',started_at=NULL WHERE id=? AND status!='completed'")->execute([(int)$_GET['id']]);flash('تم فك تعيين الطلب');go('orders');}
+$fl=$_SESSION['flash']??null;unset($_SESSION['flash']);
 ?>
-
-<html dir="rtl">
-<body style="font-family:tahoma">
-
-<?php if(!isset($_SESSION['id'])): ?>
-<form method="post">
-<input name="u" placeholder="المستخدم"><br>
-<input name="p" type="password" placeholder="كلمة المرور"><br>
-<button name="login">دخول</button>
-</form>
-<p>admin / 1234</p>
-
-<?php else: ?>
-
-<h2>النظام</h2>
-
-<?php if($_SESSION['role']=='admin'): ?>
-<form method="post">
-<input name="order" placeholder="رقم الطلب">
-<button name="add">إضافة طلب</button>
-</form>
-<?php endif; ?>
-
-<hr>
-
-<?php
-$orders=$db->query("SELECT * FROM orders")->fetchAll();
-foreach($orders as $o):
-?>
-
-<div>
-طلب: <?=$o['order_no']?> |
-حالة: <?=$o['status']?>
-
-<?php if($o['status']=='new'): ?>
-<a href="?take=<?=$o['id']?>">استلام</a>
-<?php endif; ?>
-
-<?php if($o['assigned_to']==$_SESSION['id'] && $o['status']=='working'): ?>
-<a href="?done=<?=$o['id']?>">تم</a>
-<?php endif; ?>
-
-</div>
-
-<?php endforeach; ?>
-
-<?php endif; ?>
-
-</body>
-</html>
+<!doctype html><html lang="ar" dir="rtl"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>نظام تجهيز الطلبات</title><style>:root{--m:#7b3f13;--m2:#a76b3a;--bg:#f6f2ed;--ok:#138a36;--bad:#c62828}*{box-sizing:border-box}body{margin:0;font-family:Tahoma,Arial;background:var(--bg);color:#222}.wrap{max-width:1180px;margin:auto;padding:18px}.top{background:linear-gradient(135deg,var(--m),var(--m2));color:#fff;border-radius:20px;padding:22px;margin-bottom:16px;box-shadow:0 10px 26px #0002}.top h1{margin:0 0 6px}.nav{display:flex;gap:8px;flex-wrap:wrap;margin-top:12px}.nav a{color:#fff;text-decoration:none;border:1px solid #ffffff55;border-radius:999px;padding:9px 14px;background:#ffffff22}.grid{display:grid;grid-template-columns:repeat(2,1fr);gap:16px}.grid3{display:grid;grid-template-columns:repeat(3,1fr);gap:16px}.card{background:#fff;border-radius:18px;padding:18px;box-shadow:0 8px 22px #0001;border:1px solid #eadfd5;margin-bottom:16px}input,select,button{width:100%;padding:13px;border-radius:12px;border:1px solid #d5c7ba;margin:6px 0;font-size:15px}button,.btn{background:var(--m);color:#fff;border:none;font-weight:bold;cursor:pointer;text-decoration:none;display:inline-block;text-align:center;padding:12px;border-radius:12px}.gray{background:#666}.green{background:var(--ok)}.alert{padding:12px;border-radius:12px;margin-bottom:14px;font-weight:bold}.alert.ok{background:#e7f7ec;color:var(--ok)}.alert.bad{background:#fdecec;color:var(--bad)}table{width:100%;border-collapse:collapse;background:#fff;border-radius:14px;overflow:hidden}th,td{padding:11px;border-bottom:1px solid #eee;text-align:center}th{background:#fff8f0;color:var(--m)}.badge{padding:6px 10px;border-radius:999px;font-size:13px;background:#eee}.new{background:#e8f1ff}.processing{background:#fff2cc}.completed{background:#e7f7ec}.product{border:1px solid #eee;border-radius:14px;padding:14px;margin:8px 0;background:#fff}.product.done{border-color:#25a244;background:#edfff1}.small{color:#777;font-size:13px}.login{max-width:430px;margin:70px auto}.num{font-size:30px;font-weight:bold;color:var(--m)}@media(max-width:780px){.grid,.grid3{grid-template-columns:1fr}.wrap{padding:10px}.top{border-radius:14px}}</style></head><body><div class="wrap">
+<?php if($page!=='login'&&u()): ?><div class="top"><h1>نظام تجهيز الطلبات</h1><div>مرحباً <?=h(u()['name'])?> — <?=u()['role']==='manager'?'مدير':'موظف تجهيز'?></div><div class="nav"><a href="packing_pro.php?page=dashboard">الرئيسية</a><?php if(mgr()): ?><a href="packing_pro.php?page=orders">الطلبات</a><a href="packing_pro.php?page=employees">الموظفين</a><a href="packing_pro.php?page=reports">التقارير</a><a href="packing_pro.php?page=incentives">الحوافز</a><?php endif; ?><a href="packing_pro.php?page=logout">خروج</a></div></div><?php endif; ?>
+<?php if($fl): ?><div class="alert <?=$fl['t']?>"><?=h($fl['m'])?></div><?php endif; ?>
+<?php if($page==='login'): ?><div class="card login"><h2>دخول نظام تجهيز الطلبات</h2><p class="small">نسخة تجريبية للعرض الداخلي</p><form method="post" action="packing_pro.php?page=login"><input name="username" placeholder="اسم المستخدم"><input name="password" type="password" placeholder="كلمة المرور"><button>دخول</button></form><div class="small">المدير: admin / 1234<br>موظف: ahmad / 1111</div></div>
+<?php elseif($page==='dashboard'): need(); $st=stats($db,u()['id']);$new=$db->query("SELECT COUNT(*) FROM orders WHERE status='new'")->fetchColumn();$proc=$db->query("SELECT COUNT(*) FROM orders WHERE status='processing'")->fetchColumn();$comp=$db->query("SELECT COUNT(*) FROM orders WHERE status='completed'")->fetchColumn(); ?><div class="grid3"><div class="card"><div class="small">طلبات مكتملة لي</div><div class="num"><?=$st['completed']?></div></div><div class="card"><div class="small">أخطائي</div><div class="num"><?=$st['errors']?></div></div><div class="card"><div class="small">دقتي</div><div class="num"><?=$st['accuracy']?>%</div></div></div><div class="card"><h3>فتح طلب للتجهيز</h3><p class="small">الموظف لا يرى قائمة الطلبات. امسح باركود الطلب أو اكتب رقم الطلب يدويًا.</p><form method="post" action="packing_pro.php?page=open_order"><input name="order_no" autofocus placeholder="رقم الطلب / باركود الفاتورة"><button>فتح الطلب</button></form></div><?php if(mgr()): ?><div class="grid3"><div class="card"><div class="small">طلبات جديدة</div><div class="num"><?=$new?></div></div><div class="card"><div class="small">قيد التجهيز</div><div class="num"><?=$proc?></div></div><div class="card"><div class="small">مكتملة</div><div class="num"><?=$comp?></div></div></div><?php endif; ?>
+<?php elseif($page==='orders'): need(); if(!mgr())go(); ?><div class="grid"><div class="card"><h3>رفع ملف CSV للطلبات</h3><p class="small">الأعمدة: رقم الطلب، العميل، الجوال، SKU، اسم المنتج، الكمية</p><form method="post" action="packing_pro.php?page=upload_csv" enctype="multipart/form-data"><input type="file" name="csv" accept=".csv"><button>رفع الملف</button></form></div><div class="card"><h3>إضافة طلب يدوي</h3><form method="post" action="packing_pro.php?page=add_order"><input name="order_no" placeholder="رقم الطلب"><input name="customer" placeholder="اسم العميل"><input name="phone" placeholder="رقم الجوال"><?php for($i=1;$i<=3;$i++): ?><input name="sku[]" placeholder="SKU المنتج <?=$i?>"><input name="item_name[]" placeholder="اسم المنتج <?=$i?>"><input name="qty[]" type="number" value="1"><?php endfor; ?><button>حفظ الطلب</button></form></div></div><div class="card"><h3>إدارة الطلبات</h3><table><tr><th>رقم الطلب</th><th>العميل</th><th>الحالة</th><th>الموظف المستلم</th><th>البداية</th><th>النهاية</th><th>إجراء</th></tr><?php foreach($db->query("SELECT o.*,e.name emp FROM orders o LEFT JOIN employees e ON e.id=o.assigned_to ORDER BY o.id DESC LIMIT 200") as $o): ?><tr><td><?=h($o['order_no'])?></td><td><?=h($o['customer'])?></td><td><span class="badge <?=$o['status']?>"><?=status_ar($o['status'])?></span></td><td><?=h($o['emp']?:'-')?></td><td><?=h($o['started_at']?:'-')?></td><td><?=h($o['completed_at']?:'-')?></td><td><?php if($o['status']!=='completed'&&$o['assigned_to']): ?><a class="btn gray" href="packing_pro.php?page=release_order&id=<?=$o['id']?>">فك التعيين</a><?php else: ?>-<?php endif; ?></td></tr><?php endforeach; ?></table></div>
+<?php elseif($page==='employees'): need(); if(!mgr())go(); ?><div class="grid"><div class="card"><h3>إضافة موظف</h3><form method="post" action="packing_pro.php?page=add_employee"><input name="name" placeholder="اسم الموظف"><input name="username" placeholder="اسم المستخدم"><input name="password" placeholder="كلمة المرور"><select name="role"><option value="employee">موظف تجهيز</option><option value="manager">مدير</option></select><button>إضافة</button></form></div><div class="card"><h3>قائمة الموظفين</h3><table><tr><th>الاسم</th><th>المستخدم</th><th>الصلاحية</th></tr><?php foreach($db->query('SELECT * FROM employees ORDER BY id DESC') as $e): ?><tr><td><?=h($e['name'])?></td><td><?=h($e['username'])?></td><td><?=h($e['role'])?></td></tr><?php endforeach; ?></table></div></div>
+<?php elseif($page==='reports'): need(); if(!mgr())go(); ?><div class="card"><h3>تقارير أداء الموظفين</h3><table><tr><th>الموظف</th><th>طلبات مكتملة</th><th>الأخطاء</th><th>الدقة</th><th>متوسط التجهيز بالدقائق</th></tr><?php foreach($db->query('SELECT * FROM employees ORDER BY id') as $e): $s=stats($db,$e['id']); ?><tr><td><?=h($e['name'])?></td><td><?=$s['completed']?></td><td><?=$s['errors']?></td><td><?=$s['accuracy']?>%</td><td><?=$s['avg']?></td></tr><?php endforeach; ?></table></div><div class="card"><h3>سجل الأخطاء</h3><table><tr><th>الموظف</th><th>رقم الطلب</th><th>SKU</th><th>الخطأ</th><th>الوقت</th></tr><?php foreach($db->query("SELECT l.*,e.name emp,o.order_no FROM scan_logs l LEFT JOIN employees e ON e.id=l.employee_id LEFT JOIN orders o ON o.id=l.order_id WHERE l.type!='success' ORDER BY l.id DESC LIMIT 100") as $l): ?><tr><td><?=h($l['emp'])?></td><td><?=h($l['order_no'])?></td><td><?=h($l['sku'])?></td><td><?=h($l['message'])?></td><td><?=h($l['created_at'])?></td></tr><?php endforeach; ?></table></div>
+<?php elseif($page==='incentives'): need(); if(!mgr())go(); $mo=(int)setting($db,'min_orders','50');$ma=(float)setting($db,'min_accuracy','90');$bo=(float)setting($db,'bonus_percent','5'); ?><div class="grid"><div class="card"><h3>إعدادات الحوافز</h3><form method="post" action="packing_pro.php?page=save_settings"><input name="min_orders" type="number" value="<?=$mo?>" placeholder="الحد الأدنى للطلبات"><input name="min_accuracy" type="number" step="0.1" value="<?=$ma?>" placeholder="الحد الأدنى للدقة"><input name="bonus_percent" type="number" step="0.1" value="<?=$bo?>" placeholder="نسبة الحافز"><button>حفظ الإعدادات</button></form></div><div class="card"><h3>استحقاق الحافز</h3><table><tr><th>الموظف</th><th>طلبات</th><th>الدقة</th><th>الحافز</th></tr><?php foreach($db->query("SELECT * FROM employees WHERE role='employee'") as $e): $s=stats($db,$e['id']);$ok=$s['completed']>=$mo&&$s['accuracy']>=$ma; ?><tr><td><?=h($e['name'])?></td><td><?=$s['completed']?></td><td><?=$s['accuracy']?>%</td><td><?=$ok?'يستحق '.$bo.'%':'لا يستحق'?></td></tr><?php endforeach; ?></table></div></div>
+<?php elseif($page==='prepare'): need(); $id=(int)$_GET['id'];$q=$db->prepare('SELECT * FROM orders WHERE id=?');$q->execute([$id]);$o=$q->fetch(PDO::FETCH_ASSOC);if(!$o||(int)$o['assigned_to']!=(int)u()['id']){echo '<div class="card">غير مسموح لك بعرض هذا الطلب.</div>';exit;}$q=$db->prepare('SELECT * FROM order_items WHERE order_id=?');$q->execute([$id]);$items=$q->fetchAll(PDO::FETCH_ASSOC);$all=true;foreach($items as $it){if($it['scanned']<$it['qty'])$all=false;} ?><div class="card"><h2>تجهيز الطلب رقم: <?=h($o['order_no'])?></h2><p class="small">هذا الطلب مقفل عليك حتى يتم إكماله أو يفك المدير التعيين.</p><form method="post" action="packing_pro.php?page=scan"><input type="hidden" name="order_id" value="<?=$id?>"><input name="sku" autofocus placeholder="امسح أو اكتب SKU المنتج"><button>تأكيد المنتج</button></form></div><div class="card"><h3>منتجات الطلب</h3><?php foreach($items as $it): ?><div class="product <?=$it['scanned']>=$it['qty']?'done':''?>"><b><?=h($it['name'])?></b><br><span class="small">SKU: <?=h($it['sku'])?></span><br>الكمية: <?=$it['scanned']?> / <?=$it['qty']?></div><?php endforeach; ?><?php if($all): ?><a class="btn green" href="packing_pro.php?page=complete&id=<?=$id?>">اعتماد التجهيز وحفظ الوقت</a><?php else: ?><div class="alert bad">لا يمكن اعتماد الطلب حتى تكتمل جميع المنتجات 100%</div><?php endif; ?></div><?php endif; ?>
+</div></body></html>
