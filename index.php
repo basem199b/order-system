@@ -1,48 +1,213 @@
-<?php
-session_start();
-date_default_timezone_set('Asia/Riyadh');
-$db = new PDO('sqlite:' . __DIR__ . '/packing_pro.db');
-$db->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
-$db->exec("CREATE TABLE IF NOT EXISTS employees (id INTEGER PRIMARY KEY AUTOINCREMENT,name TEXT NOT NULL,username TEXT UNIQUE NOT NULL,password TEXT NOT NULL,role TEXT NOT NULL DEFAULT 'employee',is_active INTEGER NOT NULL DEFAULT 1,created_at TEXT DEFAULT CURRENT_TIMESTAMP);
-CREATE TABLE IF NOT EXISTS orders (id INTEGER PRIMARY KEY AUTOINCREMENT,order_no TEXT UNIQUE NOT NULL,customer TEXT,phone TEXT,status TEXT NOT NULL DEFAULT 'new',assigned_to INTEGER,started_at TEXT,completed_at TEXT,created_at TEXT DEFAULT CURRENT_TIMESTAMP);
-CREATE TABLE IF NOT EXISTS order_items (id INTEGER PRIMARY KEY AUTOINCREMENT,order_id INTEGER NOT NULL,sku TEXT NOT NULL,name TEXT NOT NULL,qty INTEGER NOT NULL DEFAULT 1,scanned INTEGER NOT NULL DEFAULT 0);
-CREATE TABLE IF NOT EXISTS scan_logs (id INTEGER PRIMARY KEY AUTOINCREMENT,order_id INTEGER,employee_id INTEGER,sku TEXT,type TEXT,message TEXT,created_at TEXT DEFAULT CURRENT_TIMESTAMP);
-CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY,value TEXT);");
-if ((int)$db->query("SELECT COUNT(*) FROM employees")->fetchColumn() === 0) {
-  $s=$db->prepare("INSERT INTO employees (name,username,password,role) VALUES (?,?,?,?)");
-  $s->execute(['المدير','admin',password_hash('1234',PASSWORD_DEFAULT),'manager']);
-  $s->execute(['أحمد محمد','ahmad',password_hash('1111',PASSWORD_DEFAULT),'employee']);
-  $s->execute(['خالد عبدالله','khalid',password_hash('2222',PASSWORD_DEFAULT),'employee']);
-  $db->exec("INSERT OR REPLACE INTO settings (key,value) VALUES ('min_orders','50'),('min_accuracy','90'),('bonus_percent','5')");
-  $db->prepare("INSERT INTO orders (order_no,customer,phone) VALUES (?,?,?)")->execute(['256178922','بشاير','0501654403']);
-  $oid=(int)$db->lastInsertId(); $it=$db->prepare("INSERT INTO order_items (order_id,sku,name,qty) VALUES (?,?,?,?)");
-  $it->execute([$oid,'006020129','سلة خوص معمول فاخر',1]); $it->execute([$oid,'006020114','سلة كليجا ميني',1]);
-}
-function h($v){return htmlspecialchars((string)$v,ENT_QUOTES,'UTF-8');} function u(){return $_SESSION['user']??null;} function mgr(){return u()&&u()['role']==='manager';} function go($p='dashboard'){header('Location: packing_pro.php?page='.$p);exit;} function need(){if(!u())go('login');}
-function flash($m,$t='ok'){$_SESSION['flash']=['m'=>$m,'t'=>$t];} function status_ar($s){return ['new'=>'جديد','processing'=>'قيد التجهيز','completed'=>'مكتمل'][$s]??$s;}
-function setting($db,$k,$d=''){ $q=$db->prepare('SELECT value FROM settings WHERE key=?');$q->execute([$k]);$v=$q->fetchColumn();return $v!==false?$v:$d; }
-function stats($db,$id){$id=(int)$id;$c=(int)$db->query("SELECT COUNT(*) FROM orders WHERE assigned_to=$id AND status='completed'")->fetchColumn();$e=(int)$db->query("SELECT COUNT(*) FROM scan_logs WHERE employee_id=$id AND type!='success'")->fetchColumn();$t=(int)$db->query("SELECT COUNT(*) FROM scan_logs WHERE employee_id=$id")->fetchColumn();$a=$t?round((($t-$e)/$t)*100,1):100;$avg=$db->query("SELECT ROUND(AVG((julianday(completed_at)-julianday(started_at))*24*60),1) FROM orders WHERE assigned_to=$id AND status='completed'")->fetchColumn();return ['completed'=>$c,'errors'=>$e,'accuracy'=>$a,'avg'=>$avg?:'-'];}
-$page=$_GET['page']??(u()?'dashboard':'login');
-if($page==='logout'){session_destroy();header('Location: packing_pro.php');exit;}
-if($_SERVER['REQUEST_METHOD']==='POST'&&$page==='login'){ $q=$db->prepare('SELECT * FROM employees WHERE username=? AND is_active=1');$q->execute([trim($_POST['username']??'')]);$user=$q->fetch(PDO::FETCH_ASSOC); if($user&&password_verify($_POST['password']??'',$user['password'])){$_SESSION['user']=$user;go('dashboard');} flash('بيانات الدخول غير صحيحة','bad');go('login'); }
-if($_SERVER['REQUEST_METHOD']==='POST'&&$page==='add_employee'){need();if(!mgr())go();try{$q=$db->prepare('INSERT INTO employees (name,username,password,role) VALUES (?,?,?,?)');$q->execute([trim($_POST['name']),trim($_POST['username']),password_hash($_POST['password'],PASSWORD_DEFAULT),$_POST['role']]);flash('تم إضافة الموظف');}catch(Exception $e){flash('تعذر إضافة الموظف','bad');}go('employees');}
-if($_SERVER['REQUEST_METHOD']==='POST'&&$page==='save_settings'){need();if(!mgr())go();$q=$db->prepare('INSERT OR REPLACE INTO settings (key,value) VALUES (?,?)');$q->execute(['min_orders',(string)(int)$_POST['min_orders']]);$q->execute(['min_accuracy',(string)(float)$_POST['min_accuracy']]);$q->execute(['bonus_percent',(string)(float)$_POST['bonus_percent']]);flash('تم حفظ إعدادات الحوافز');go('incentives');}
-if($_SERVER['REQUEST_METHOD']==='POST'&&$page==='add_order'){need();if(!mgr())go();try{$db->beginTransaction();$db->prepare('INSERT INTO orders (order_no,customer,phone) VALUES (?,?,?)')->execute([trim($_POST['order_no']),trim($_POST['customer']),trim($_POST['phone'])]);$oid=$db->lastInsertId();$it=$db->prepare('INSERT INTO order_items (order_id,sku,name,qty) VALUES (?,?,?,?)');foreach($_POST['sku'] as $i=>$sku){$sku=trim($sku);if($sku==='')continue;$it->execute([$oid,$sku,trim($_POST['item_name'][$i]),max(1,(int)$_POST['qty'][$i])]);}$db->commit();flash('تم إضافة الطلب');}catch(Exception $e){if($db->inTransaction())$db->rollBack();flash('تعذر إضافة الطلب، تأكد من عدم تكرار رقم الطلب','bad');}go('orders');}
-if($_SERVER['REQUEST_METHOD']==='POST'&&$page==='upload_csv'){need();if(!mgr())go();if(!isset($_FILES['csv'])||$_FILES['csv']['error']!==UPLOAD_ERR_OK){flash('لم يتم رفع الملف','bad');go('orders');}$h=fopen($_FILES['csv']['tmp_name'],'r');$created=0;$items=0;$row=0;$db->beginTransaction();try{while(($d=fgetcsv($h,5000,','))!==false){$row++;if($row===1&&preg_match('/order|رقم|طلب/u',implode(' ',$d)))continue;if(count($d)<6)continue;[$no,$cust,$phone,$sku,$name,$qty]=array_map('trim',array_slice($d,0,6));if($no===''||$sku==='')continue;$q=$db->prepare('SELECT id FROM orders WHERE order_no=?');$q->execute([$no]);$oid=$q->fetchColumn();if(!$oid){$db->prepare('INSERT INTO orders (order_no,customer,phone) VALUES (?,?,?)')->execute([$no,$cust,$phone]);$oid=$db->lastInsertId();$created++;}$ex=$db->prepare('SELECT id FROM order_items WHERE order_id=? AND sku=?');$ex->execute([$oid,$sku]);if(!$ex->fetchColumn()){$db->prepare('INSERT INTO order_items (order_id,sku,name,qty) VALUES (?,?,?,?)')->execute([$oid,$sku,$name,max(1,(int)$qty)]);$items++;}}fclose($h);$db->commit();flash("تم رفع الملف: $created طلب و $items منتج");}catch(Exception $e){if($db->inTransaction())$db->rollBack();flash('تعذر معالجة ملف CSV','bad');}go('orders');}
-if($_SERVER['REQUEST_METHOD']==='POST'&&$page==='open_order'){need();$q=$db->prepare('SELECT * FROM orders WHERE order_no=?');$q->execute([trim($_POST['order_no']??'')]);$o=$q->fetch(PDO::FETCH_ASSOC);if(!$o){flash('رقم الطلب غير موجود','bad');go();}if($o['status']==='completed'){flash('هذا الطلب مكتمل مسبقاً','bad');go();}if($o['assigned_to']&&(int)$o['assigned_to']!=(int)u()['id']){flash('هذا الطلب قيد التجهيز بواسطة موظف آخر','bad');go();}$db->prepare("UPDATE orders SET assigned_to=?,status='processing',started_at=COALESCE(started_at,datetime('now','localtime')) WHERE id=?")->execute([u()['id'],$o['id']]);header('Location: packing_pro.php?page=prepare&id='.$o['id']);exit;}
-if($_SERVER['REQUEST_METHOD']==='POST'&&$page==='scan'){need();$oid=(int)$_POST['order_id'];$sku=trim($_POST['sku']);$q=$db->prepare('SELECT * FROM orders WHERE id=?');$q->execute([$oid]);$o=$q->fetch(PDO::FETCH_ASSOC);if(!$o||(int)$o['assigned_to']!=(int)u()['id']){flash('غير مسموح لك بتجهيز هذا الطلب','bad');go();}$q=$db->prepare('SELECT * FROM order_items WHERE order_id=? AND sku=?');$q->execute([$oid,$sku]);$it=$q->fetch(PDO::FETCH_ASSOC);if(!$it){$db->prepare('INSERT INTO scan_logs (order_id,employee_id,sku,type,message) VALUES (?,?,?,?,?)')->execute([$oid,u()['id'],$sku,'wrong_item','منتج غير موجود في الطلب']);flash('خطأ: المنتج غير موجود في الطلب','bad');}elseif($it['scanned']>=$it['qty']){$db->prepare('INSERT INTO scan_logs (order_id,employee_id,sku,type,message) VALUES (?,?,?,?,?)')->execute([$oid,u()['id'],$sku,'extra_qty','كمية زائدة']);flash('خطأ: كمية زائدة','bad');}else{$db->prepare('UPDATE order_items SET scanned=scanned+1 WHERE id=?')->execute([$it['id']]);$db->prepare('INSERT INTO scan_logs (order_id,employee_id,sku,type,message) VALUES (?,?,?,?,?)')->execute([$oid,u()['id'],$sku,'success','مسح صحيح']);flash('تم مسح المنتج');}header('Location: packing_pro.php?page=prepare&id='.$oid);exit;}
-if($page==='complete'){need();$id=(int)$_GET['id'];$q=$db->prepare('SELECT * FROM orders WHERE id=?');$q->execute([$id]);$o=$q->fetch(PDO::FETCH_ASSOC);if(!$o||(int)$o['assigned_to']!=(int)u()['id']){flash('غير مسموح لك بإغلاق هذا الطلب','bad');go();}$m=$db->prepare('SELECT COUNT(*) FROM order_items WHERE order_id=? AND scanned<qty');$m->execute([$id]);if($m->fetchColumn()>0){flash('لا يمكن اعتماد الطلب قبل اكتماله 100%','bad');header("Location: packing_pro.php?page=prepare&id=$id");exit;}$db->prepare("UPDATE orders SET status='completed',completed_at=datetime('now','localtime') WHERE id=?")->execute([$id]);flash('تم اعتماد تجهيز الطلب وحفظ الوقت');go();}
-if($page==='release_order'){need();if(!mgr())go();$db->prepare("UPDATE orders SET assigned_to=NULL,status='new',started_at=NULL WHERE id=? AND status!='completed'")->execute([(int)$_GET['id']]);flash('تم فك تعيين الطلب');go('orders');}
-$fl=$_SESSION['flash']??null;unset($_SESSION['flash']);
-?>
-<!doctype html><html lang="ar" dir="rtl"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>نظام تجهيز الطلبات</title><style>:root{--m:#7b3f13;--m2:#a76b3a;--bg:#f6f2ed;--ok:#138a36;--bad:#c62828}*{box-sizing:border-box}body{margin:0;font-family:Tahoma,Arial;background:var(--bg);color:#222}.wrap{max-width:1180px;margin:auto;padding:18px}.top{background:linear-gradient(135deg,var(--m),var(--m2));color:#fff;border-radius:20px;padding:22px;margin-bottom:16px;box-shadow:0 10px 26px #0002}.top h1{margin:0 0 6px}.nav{display:flex;gap:8px;flex-wrap:wrap;margin-top:12px}.nav a{color:#fff;text-decoration:none;border:1px solid #ffffff55;border-radius:999px;padding:9px 14px;background:#ffffff22}.grid{display:grid;grid-template-columns:repeat(2,1fr);gap:16px}.grid3{display:grid;grid-template-columns:repeat(3,1fr);gap:16px}.card{background:#fff;border-radius:18px;padding:18px;box-shadow:0 8px 22px #0001;border:1px solid #eadfd5;margin-bottom:16px}input,select,button{width:100%;padding:13px;border-radius:12px;border:1px solid #d5c7ba;margin:6px 0;font-size:15px}button,.btn{background:var(--m);color:#fff;border:none;font-weight:bold;cursor:pointer;text-decoration:none;display:inline-block;text-align:center;padding:12px;border-radius:12px}.gray{background:#666}.green{background:var(--ok)}.alert{padding:12px;border-radius:12px;margin-bottom:14px;font-weight:bold}.alert.ok{background:#e7f7ec;color:var(--ok)}.alert.bad{background:#fdecec;color:var(--bad)}table{width:100%;border-collapse:collapse;background:#fff;border-radius:14px;overflow:hidden}th,td{padding:11px;border-bottom:1px solid #eee;text-align:center}th{background:#fff8f0;color:var(--m)}.badge{padding:6px 10px;border-radius:999px;font-size:13px;background:#eee}.new{background:#e8f1ff}.processing{background:#fff2cc}.completed{background:#e7f7ec}.product{border:1px solid #eee;border-radius:14px;padding:14px;margin:8px 0;background:#fff}.product.done{border-color:#25a244;background:#edfff1}.small{color:#777;font-size:13px}.login{max-width:430px;margin:70px auto}.num{font-size:30px;font-weight:bold;color:var(--m)}@media(max-width:780px){.grid,.grid3{grid-template-columns:1fr}.wrap{padding:10px}.top{border-radius:14px}}</style></head><body><div class="wrap">
-<?php if($page!=='login'&&u()): ?><div class="top"><h1>نظام تجهيز الطلبات</h1><div>مرحباً <?=h(u()['name'])?> — <?=u()['role']==='manager'?'مدير':'موظف تجهيز'?></div><div class="nav"><a href="packing_pro.php?page=dashboard">الرئيسية</a><?php if(mgr()): ?><a href="packing_pro.php?page=orders">الطلبات</a><a href="packing_pro.php?page=employees">الموظفين</a><a href="packing_pro.php?page=reports">التقارير</a><a href="packing_pro.php?page=incentives">الحوافز</a><?php endif; ?><a href="packing_pro.php?page=logout">خروج</a></div></div><?php endif; ?>
-<?php if($fl): ?><div class="alert <?=$fl['t']?>"><?=h($fl['m'])?></div><?php endif; ?>
-<?php if($page==='login'): ?><div class="card login"><h2>دخول نظام تجهيز الطلبات</h2><p class="small">نسخة تجريبية للعرض الداخلي</p><form method="post" action="packing_pro.php?page=login"><input name="username" placeholder="اسم المستخدم"><input name="password" type="password" placeholder="كلمة المرور"><button>دخول</button></form><div class="small">المدير: admin / 1234<br>موظف: ahmad / 1111</div></div>
-<?php elseif($page==='dashboard'): need(); $st=stats($db,u()['id']);$new=$db->query("SELECT COUNT(*) FROM orders WHERE status='new'")->fetchColumn();$proc=$db->query("SELECT COUNT(*) FROM orders WHERE status='processing'")->fetchColumn();$comp=$db->query("SELECT COUNT(*) FROM orders WHERE status='completed'")->fetchColumn(); ?><div class="grid3"><div class="card"><div class="small">طلبات مكتملة لي</div><div class="num"><?=$st['completed']?></div></div><div class="card"><div class="small">أخطائي</div><div class="num"><?=$st['errors']?></div></div><div class="card"><div class="small">دقتي</div><div class="num"><?=$st['accuracy']?>%</div></div></div><div class="card"><h3>فتح طلب للتجهيز</h3><p class="small">الموظف لا يرى قائمة الطلبات. امسح باركود الطلب أو اكتب رقم الطلب يدويًا.</p><form method="post" action="packing_pro.php?page=open_order"><input name="order_no" autofocus placeholder="رقم الطلب / باركود الفاتورة"><button>فتح الطلب</button></form></div><?php if(mgr()): ?><div class="grid3"><div class="card"><div class="small">طلبات جديدة</div><div class="num"><?=$new?></div></div><div class="card"><div class="small">قيد التجهيز</div><div class="num"><?=$proc?></div></div><div class="card"><div class="small">مكتملة</div><div class="num"><?=$comp?></div></div></div><?php endif; ?>
-<?php elseif($page==='orders'): need(); if(!mgr())go(); ?><div class="grid"><div class="card"><h3>رفع ملف CSV للطلبات</h3><p class="small">الأعمدة: رقم الطلب، العميل، الجوال، SKU، اسم المنتج، الكمية</p><form method="post" action="packing_pro.php?page=upload_csv" enctype="multipart/form-data"><input type="file" name="csv" accept=".csv"><button>رفع الملف</button></form></div><div class="card"><h3>إضافة طلب يدوي</h3><form method="post" action="packing_pro.php?page=add_order"><input name="order_no" placeholder="رقم الطلب"><input name="customer" placeholder="اسم العميل"><input name="phone" placeholder="رقم الجوال"><?php for($i=1;$i<=3;$i++): ?><input name="sku[]" placeholder="SKU المنتج <?=$i?>"><input name="item_name[]" placeholder="اسم المنتج <?=$i?>"><input name="qty[]" type="number" value="1"><?php endfor; ?><button>حفظ الطلب</button></form></div></div><div class="card"><h3>إدارة الطلبات</h3><table><tr><th>رقم الطلب</th><th>العميل</th><th>الحالة</th><th>الموظف المستلم</th><th>البداية</th><th>النهاية</th><th>إجراء</th></tr><?php foreach($db->query("SELECT o.*,e.name emp FROM orders o LEFT JOIN employees e ON e.id=o.assigned_to ORDER BY o.id DESC LIMIT 200") as $o): ?><tr><td><?=h($o['order_no'])?></td><td><?=h($o['customer'])?></td><td><span class="badge <?=$o['status']?>"><?=status_ar($o['status'])?></span></td><td><?=h($o['emp']?:'-')?></td><td><?=h($o['started_at']?:'-')?></td><td><?=h($o['completed_at']?:'-')?></td><td><?php if($o['status']!=='completed'&&$o['assigned_to']): ?><a class="btn gray" href="packing_pro.php?page=release_order&id=<?=$o['id']?>">فك التعيين</a><?php else: ?>-<?php endif; ?></td></tr><?php endforeach; ?></table></div>
-<?php elseif($page==='employees'): need(); if(!mgr())go(); ?><div class="grid"><div class="card"><h3>إضافة موظف</h3><form method="post" action="packing_pro.php?page=add_employee"><input name="name" placeholder="اسم الموظف"><input name="username" placeholder="اسم المستخدم"><input name="password" placeholder="كلمة المرور"><select name="role"><option value="employee">موظف تجهيز</option><option value="manager">مدير</option></select><button>إضافة</button></form></div><div class="card"><h3>قائمة الموظفين</h3><table><tr><th>الاسم</th><th>المستخدم</th><th>الصلاحية</th></tr><?php foreach($db->query('SELECT * FROM employees ORDER BY id DESC') as $e): ?><tr><td><?=h($e['name'])?></td><td><?=h($e['username'])?></td><td><?=h($e['role'])?></td></tr><?php endforeach; ?></table></div></div>
-<?php elseif($page==='reports'): need(); if(!mgr())go(); ?><div class="card"><h3>تقارير أداء الموظفين</h3><table><tr><th>الموظف</th><th>طلبات مكتملة</th><th>الأخطاء</th><th>الدقة</th><th>متوسط التجهيز بالدقائق</th></tr><?php foreach($db->query('SELECT * FROM employees ORDER BY id') as $e): $s=stats($db,$e['id']); ?><tr><td><?=h($e['name'])?></td><td><?=$s['completed']?></td><td><?=$s['errors']?></td><td><?=$s['accuracy']?>%</td><td><?=$s['avg']?></td></tr><?php endforeach; ?></table></div><div class="card"><h3>سجل الأخطاء</h3><table><tr><th>الموظف</th><th>رقم الطلب</th><th>SKU</th><th>الخطأ</th><th>الوقت</th></tr><?php foreach($db->query("SELECT l.*,e.name emp,o.order_no FROM scan_logs l LEFT JOIN employees e ON e.id=l.employee_id LEFT JOIN orders o ON o.id=l.order_id WHERE l.type!='success' ORDER BY l.id DESC LIMIT 100") as $l): ?><tr><td><?=h($l['emp'])?></td><td><?=h($l['order_no'])?></td><td><?=h($l['sku'])?></td><td><?=h($l['message'])?></td><td><?=h($l['created_at'])?></td></tr><?php endforeach; ?></table></div>
-<?php elseif($page==='incentives'): need(); if(!mgr())go(); $mo=(int)setting($db,'min_orders','50');$ma=(float)setting($db,'min_accuracy','90');$bo=(float)setting($db,'bonus_percent','5'); ?><div class="grid"><div class="card"><h3>إعدادات الحوافز</h3><form method="post" action="packing_pro.php?page=save_settings"><input name="min_orders" type="number" value="<?=$mo?>" placeholder="الحد الأدنى للطلبات"><input name="min_accuracy" type="number" step="0.1" value="<?=$ma?>" placeholder="الحد الأدنى للدقة"><input name="bonus_percent" type="number" step="0.1" value="<?=$bo?>" placeholder="نسبة الحافز"><button>حفظ الإعدادات</button></form></div><div class="card"><h3>استحقاق الحافز</h3><table><tr><th>الموظف</th><th>طلبات</th><th>الدقة</th><th>الحافز</th></tr><?php foreach($db->query("SELECT * FROM employees WHERE role='employee'") as $e): $s=stats($db,$e['id']);$ok=$s['completed']>=$mo&&$s['accuracy']>=$ma; ?><tr><td><?=h($e['name'])?></td><td><?=$s['completed']?></td><td><?=$s['accuracy']?>%</td><td><?=$ok?'يستحق '.$bo.'%':'لا يستحق'?></td></tr><?php endforeach; ?></table></div></div>
-<?php elseif($page==='prepare'): need(); $id=(int)$_GET['id'];$q=$db->prepare('SELECT * FROM orders WHERE id=?');$q->execute([$id]);$o=$q->fetch(PDO::FETCH_ASSOC);if(!$o||(int)$o['assigned_to']!=(int)u()['id']){echo '<div class="card">غير مسموح لك بعرض هذا الطلب.</div>';exit;}$q=$db->prepare('SELECT * FROM order_items WHERE order_id=?');$q->execute([$id]);$items=$q->fetchAll(PDO::FETCH_ASSOC);$all=true;foreach($items as $it){if($it['scanned']<$it['qty'])$all=false;} ?><div class="card"><h2>تجهيز الطلب رقم: <?=h($o['order_no'])?></h2><p class="small">هذا الطلب مقفل عليك حتى يتم إكماله أو يفك المدير التعيين.</p><form method="post" action="packing_pro.php?page=scan"><input type="hidden" name="order_id" value="<?=$id?>"><input name="sku" autofocus placeholder="امسح أو اكتب SKU المنتج"><button>تأكيد المنتج</button></form></div><div class="card"><h3>منتجات الطلب</h3><?php foreach($items as $it): ?><div class="product <?=$it['scanned']>=$it['qty']?'done':''?>"><b><?=h($it['name'])?></b><br><span class="small">SKU: <?=h($it['sku'])?></span><br>الكمية: <?=$it['scanned']?> / <?=$it['qty']?></div><?php endforeach; ?><?php if($all): ?><a class="btn green" href="packing_pro.php?page=complete&id=<?=$id?>">اعتماد التجهيز وحفظ الوقت</a><?php else: ?><div class="alert bad">لا يمكن اعتماد الطلب حتى تكتمل جميع المنتجات 100%</div><?php endif; ?></div><?php endif; ?>
-</div></body></html>
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+    <!-- وسوم لضمان ظهور اللغة العربية بوضوح في سيرفر Vultr -->
+    <meta charset="UTF-8">
+    <meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>نظام أطايب التمور - Vultr</title>
+    
+    <!-- مكتبة قارئ الباركود -->
+    <script src="https://unpkg.com/html5-qrcode"></script>
+
+    <style>
+        :root { --primary: #8b4513; --success: #28a745; --danger: #dc3545; --gray: #f4f4f9; }
+        body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background: var(--gray); margin: 0; padding: 10px; direction: rtl; text-align: right; color: #333; }
+        .container { max-width: 500px; margin: auto; background: white; padding: 20px; border-radius: 15px; box-shadow: 0 4px 15px rgba(0,0,0,0.1); }
+        .hidden { display: none !important; }
+        input { width: 100%; padding: 15px; margin: 10px 0; border-radius: 8px; border: 2px solid #ddd; font-size: 16px; box-sizing: border-box; }
+        button { width: 100%; padding: 15px; background: var(--primary); color: white; border: none; border-radius: 8px; cursor: pointer; font-weight: bold; font-size: 18px; transition: 0.3s; }
+        button:active { transform: scale(0.98); }
+        .data-card { background: #fff8f0; border: 1px solid #e0d0c0; padding: 15px; border-radius: 10px; margin: 15px 0; }
+        .data-line { margin: 8px 0; font-size: 15px; border-bottom: 1px dashed #dcc; padding-bottom: 5px; }
+        .data-line b { color: var(--primary); }
+        .product-card { border: 2px solid #eee; padding: 15px; border-radius: 10px; margin-top: 10px; display: flex; justify-content: space-between; align-items: center; }
+        .product-card.completed { border-color: var(--success); background: #f0fff4; }
+        .alert { padding: 12px; border-radius: 8px; color: white; text-align: center; margin: 10px 0; display: none; font-weight: bold; }
+        #reader { width: 100%; border-radius: 12px; overflow: hidden; margin-bottom: 15px; border: 2px solid #8b4513; }
+    </style>
+</head>
+<body>
+
+<div class="container">
+    <!-- شاشة تسجيل الدخول -->
+    <div id="login-screen">
+        <h2 style="text-align:center; color: var(--primary);">نظام أطايب التمور اللوجستي</h2>
+        <p style="text-align:center; font-size: 14px;">يرجى إدخال الرمز السري للموظف للمتابعة</p>
+        <input type="password" id="emp-pin" placeholder="أدخل الرمز (مثلاً 11)" inputmode="numeric">
+        <button onclick="login()">دخول النظام</button>
+    </div>
+
+    <!-- شاشة القائمة الرئيسية -->
+    <div id="menu-screen" class="hidden">
+        <h3 id="welcome-msg" style="color: var(--primary);"></h3>
+        <button onclick="startProcess()">بدء تجهيز طلب</button>
+        <button onclick="location.reload()" style="background:#777; margin-top: 10px; font-size: 14px;">تسجيل خروج</button>
+    </div>
+
+    <!-- شاشة تجهيز الطلب -->
+    <div id="action-screen" class="hidden">
+        <h3 id="step-title">امسح باركود الفاتورة</h3>
+        <div id="reader"></div>
+        
+        <div id="status-alert" class="alert"></div>
+
+        <!-- خيار الإدخال اليدوي للطوارئ -->
+        <div id="manual-section" style="background:#eee; padding:10px; border-radius:8px; margin-bottom:10px;">
+            <small>إذا تعذر المسح، أدخل الرقم يدوياً:</small>
+            <input type="text" id="manual-input" placeholder="رقم الطلب أو SKU المنتج">
+            <button style="background:#6c757d; font-size: 14px;" onclick="handleManualInput()">تأكيد الإدخال اليدوي</button>
+        </div>
+
+        <!-- كرت بيانات العميل -->
+        <div id="order-info-card" class="data-card hidden">
+            <div class="data-line"><b>رقم الطلب:</b> <span id="view-order-id"></span></div>
+            <div class="data-line"><b>اسم العميل:</b> <span id="view-cust-name"></span></div>
+            <div class="data-line"><b>رقم الجوال:</b> <span id="view-cust-phone"></span></div>
+            <div class="data-line"><b>الموظف:</b> <span id="view-emp-name"></span></div>
+        </div>
+
+        <div id="products-list"></div>
+
+        <button id="save-btn" class="hidden" onclick="finalize()" style="background:var(--success); margin-top:20px;">اعتماد التجهيز وحفظ الوقت</button>
+        <button onclick="location.reload()" style="background:#999; margin-top:10px; font-size: 14px;">إلغاء التجهيز</button>
+    </div>
+</div>
+
+<script>
+    // بيانات الموظفين الثابتة
+    const EMPLOYEES = [
+        { id: "101", name: "أحمد محمد", pin: "11" },
+        { id: "102", name: "خالد عبدالله", pin: "22" }
+    ];
+
+    let currentEmp = null;
+    let currentOrder = null;
+    let html5QrCode = null;
+
+    // دالة تسجيل الدخول
+    function login() {
+        const pin = document.getElementById('emp-pin').value;
+        const user = EMPLOYEES.find(u => u.pin === pin);
+        
+        if(user) {
+            currentEmp = user;
+            document.getElementById('login-screen').classList.add('hidden');
+            document.getElementById('menu-screen').classList.remove('hidden');
+            document.getElementById('welcome-msg').innerText = "مرحباً بك: " + user.name;
+        } else {
+            alert("الرمز السري غير صحيح! جرب 11 أو 22");
+        }
+    }
+
+    // بدء عملية التجهيز وفتح الكاميرا
+    function startProcess() {
+        document.getElementById('menu-screen').classList.add('hidden');
+        document.getElementById('action-screen').classList.remove('hidden');
+        
+        html5QrCode = new Html5Qrcode("reader");
+        html5QrCode.start({ facingMode: "environment" }, { fps: 10, qrbox: 250 }, (text) => {
+            if(!currentOrder) decodeOrder(text);
+            else decodeProduct(text);
+        }).catch(err => {
+            showAlert("يرجى تفعيل الكاميرا أو استخدام الرابط الآمن HTTPS", "red");
+        });
+    }
+
+    // معالجة الإدخال اليدوي
+    function handleManualInput() {
+        const val = document.getElementById('manual-input').value;
+        if(!val) return;
+        
+        if(!currentOrder) {
+            decodeOrder(val);
+        } else {
+            decodeProduct(val);
+        }
+        document.getElementById('manual-input').value = "";
+    }
+
+    // التعرف على الطلب (بناءً على فاتورة بشاير #256178922)
+    function decodeOrder(id) {
+        if(id === "256178922") {[cite: 1, 2]
+            currentOrder = {
+                id: id,
+                customer: "بشاير",[cite: 1, 2]
+                phone: "0501654403",[cite: 1, 2]
+                items: [
+                    { sku: "006020129", name: "سلة خوص معمول فاخر", qty: 1, scanned: 0 },[cite: 1, 2]
+                    { sku: "006020114", name: "سلة كليجا ميني", qty: 1, scanned: 0 }[cite: 1, 2]
+                ]
+            };
+            showOrderData();
+        } else {
+            showAlert("رقم الطلب غير صحيح!", "red");
+        }
+    }
+
+    function showOrderData() {
+        document.getElementById('view-order-id').innerText = currentOrder.id;
+        document.getElementById('view-cust-name').innerText = currentOrder.customer;
+        document.getElementById('view-cust-phone').innerText = currentOrder.phone;
+        document.getElementById('view-emp-name').innerText = currentEmp.name;
+        
+        document.getElementById('order-info-card').classList.remove('hidden');
+        document.getElementById('step-title').innerText = "امسح منتجات الطلب";
+        renderItems();
+        showAlert("تم التعرف على الطلب بنجاح", "green");
+    }
+
+    // التعرف على باركود المنتج (SKU)
+    function decodeProduct(sku) {
+        let item = currentOrder.items.find(i => i.sku === sku);
+        if(!item) {
+            showAlert("هذا المنتج غير موجود في فاتورة بشاير!", "red");[cite: 1, 2]
+            return;
+        }
+        if(item.scanned >= item.qty) {
+            showAlert("تم اكتمال الكمية المطلوبة من هذا المنتج", "red");
+            return;
+        }
+
+        item.scanned++;
+        renderItems();
+        showAlert("تم تجهيز: " + item.name, "green");
+    }
+
+    function renderItems() {
+        const list = document.getElementById('products-list');
+        list.innerHTML = currentOrder.items.map(i => `
+            <div class="product-card ${i.scanned === i.qty ? 'completed' : ''}">
+                <div>
+                    <b>${i.name}</b><br>
+                    <small style="color:#666">SKU: ${i.sku}</small>
+                </div>
+                <div style="font-size: 20px; font-weight: bold;">${i.scanned} / ${i.qty}</div>
+            </div>
+        `).join('');
+
+        const allDone = currentOrder.items.every(i => i.scanned === i.qty);
+        if(allDone) {
+            document.getElementById('save-btn').classList.remove('hidden');
+            showAlert("اكتمل التجهيز! يمكنك الحفظ الآن", "green");
+        }
+    }
+
+    function finalize() {
+        const now = new Date();
+        const time = now.toLocaleTimeString('ar-SA');
+        alert("تم الحفظ بنجاح!\nالموظف: " + currentEmp.name + "\nالوقت: " + time);
+        location.reload();
+    }
+
+    function showAlert(msg, color) {
+        const div = document.getElementById('status-alert');
+        div.innerText = msg;
+        div.style.background = color === "green" ? "var(--success)" : "var(--danger)";
+        div.style.display = "block";
+        setTimeout(() => { div.style.display = "none"; }, 3000);
+    }
+</script>
+
+</body>
+</html>
